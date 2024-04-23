@@ -36,7 +36,7 @@ type FlagKeyAsBase64 struct{}
 
 func (f *FlagKeyAsBase64) WriteTo(dst io.Writer) (int64, error) {
 	if f != nil {
-		n, err := fmt.Fprintf(dst, "b")
+		n, err := dst.Write([]byte{'b'})
 		return int64(n), err
 	}
 	return 0, nil
@@ -291,9 +291,13 @@ const (
 	MetaSetModeMax
 )
 
-func (m MetaSetMode) WriteTo(dst io.Writer) (int64, error) {
+func (m *MetaSetMode) WriteTo(dst io.Writer) (int64, error) {
+	if m == nil {
+		return 0, nil
+	}
+
 	flag := []byte{'M'}
-	switch m {
+	switch *m {
 	case MetaSetModeSet:
 		flag = append(flag, 'S')
 	case MetaSetModeAdd:

@@ -1,6 +1,7 @@
 package memdproto
 
 import (
+	"bufio"
 	"bytes"
 	"encoding/base64"
 	"fmt"
@@ -42,7 +43,11 @@ func (cmd *MetaGetCmd) Key() string {
 }
 
 func (cmd *MetaGetCmd) SetKeyAsBase64(b bool) *MetaGetCmd {
-	cmd.b64 = &FlagKeyAsBase64{}
+	if b {
+		cmd.b64 = &FlagKeyAsBase64{}
+	} else {
+		cmd.b64 = nil
+	}
 	return cmd
 }
 
@@ -171,6 +176,12 @@ func (cmd *MetaGetCmd) WriteTo(dst io.Writer) (int64, error) {
 
 	n64, err := writeFlags(dst, cmd.b64, cmd.cas, cmd.clientFlags, cmd.prevHit, cmd.rkey, cmd.timeSinceLastAccess, cmd.vivify, cmd.opaque, cmd.noreply, cmd.recache, cmd.itemSize, cmd.remainingTTL, cmd.updateTTL, cmd.skipLRUBump, cmd.value)
 	written += n64
+	if err != nil {
+		return written, err
+	}
+
+	n, err = dst.Write(crlf)
+	written += int64(n)
 	if err != nil {
 		return written, err
 	}
@@ -481,6 +492,15 @@ func (mr *MetaGetReply) SetValue(b []byte) *MetaGetReply {
 	return mr
 }
 
+func (mr *MetaGetReply) SetKeyAsBase64(b bool) *MetaGetReply {
+	if b {
+		mr.b64 = &FlagKeyAsBase64{}
+	} else {
+		mr.b64 = nil
+	}
+	return mr
+}
+
 func (mr *MetaGetReply) SetCas(v uint64) *MetaGetReply {
 	f := FlagRetrieveCas(v)
 	mr.cas = &f
@@ -498,6 +518,15 @@ func (mr *MetaGetReply) SetPreviousHit(b bool) *MetaGetReply {
 		mr.prevHit = new(FlagRetrievePreviousHit)
 	} else {
 		mr.prevHit = nil
+	}
+	return mr
+}
+
+func (mr *MetaGetReply) SetRetrieveKey(s string) *MetaGetReply {
+	if s == "" {
+		mr.rkey = nil
+	} else {
+		mr.rkey = &FlagRetrieveKey{key: &s}
 	}
 	return mr
 }
@@ -627,4 +656,319 @@ func (mr *MetaGetReply) WriteTo(dst io.Writer) (int64, error) {
 	n, err := dst.Write(crlf)
 	written += int64(n)
 	return written, err
+}
+
+func (reply *MetaGetReply) ReadFrom(src io.Reader) (int64, error) {
+	// Read the next line
+	brdr := bufio.NewReader(src)
+	line, err := brdr.ReadBytes('\n')
+	if err != nil {
+		return int64(len(line)), err
+	}
+
+	lline := len(line)
+	nread := int64(lline)
+	if lline < 2 || (line[lline-2] != '\r') || (line[lline-1] != '\n') {
+		return int64(lline), fmt.Errorf(`expected CRLF at end of line`)
+	}
+
+	line = line[:lline-2] // strip CRLF
+
+	if lline == 2 && line[0] == 'E' && line[1] == 'N' {
+		reply.miss = true
+		return nread, nil
+	} else if lline > 2 && line[0] == 'H' && line[1] == 'D' && line[2] == ' ' {
+		reply.readFlags(line[3:])
+		if err != nil {
+			return nread, fmt.Errorf(`failed to read flags: %w`, err)
+		}
+		return nread, nil
+	} else if lline > 4 && line[0] == 'V' && line[1] == 'A' && line[2] == ' ' {
+		rb := readbuf{data: line[3:]}
+		var size strings.Builder
+		for rb.Len() > 0 && rb.data[0] != ' ' {
+			size.WriteByte(rb.data[0])
+			rb.Advance()
+		}
+
+		if rb.data[0] != ' ' {
+			return 0, fmt.Errorf(`expected space after size in response`)
+		}
+		rb.Advance()
+
+		if size.Len() == 0 {
+			return 0, fmt.Errorf(`expected size after VA flag`)
+		}
+
+		sz, err := strconv.ParseUint(size.String(), 10, 64)
+		if err != nil {
+			return 0, fmt.Errorf(`failed to parse size: %w`, err)
+		}
+
+		_, err = reply.readFlags(rb.data)
+		if err != nil {
+			return int64(nread), fmt.Errorf(`failed to read flags: %w`, err)
+		}
+
+		// we should read sz bytes, followed by CRLF
+		buf := make([]byte, sz)
+		valread, err := brdr.Read(buf)
+		nread += int64(valread)
+		if uint64(valread) != sz {
+			return nread, fmt.Errorf(`failed to read value: expected %d bytes, got %d`, sz, valread)
+		}
+		if err != nil {
+			return nread, fmt.Errorf(`failed to read value: %w`, err)
+		}
+		reply.value = buf
+
+		// read the CRLF
+		var crlfbuf [2]byte
+		ncrlf, err := brdr.Read(crlfbuf[:])
+		nread += int64(ncrlf)
+		if err != nil {
+			return int64(nread), fmt.Errorf(`failed to read CRLF: %w`, err)
+		}
+		if ncrlf != 2 || !bytes.Equal(crlfbuf[:], crlf) {
+			return int64(nread), fmt.Errorf(`expected CRLF after value, got %d bytes`, ncrlf)
+		}
+		return nread, nil
+	} else if lline > 12 && bytes.Equal(line[:12], []byte("CLIENT_ERROR ")) {
+		return nread, fmt.Errorf(`client error: %s`, line[12:])
+	}
+
+	return nread, fmt.Errorf(`unexpected response for mg command`)
+}
+
+type readbuf struct {
+	data  []byte
+	nread int
+}
+
+func (rb *readbuf) Advance() {
+	rb.data = rb.data[1:]
+	rb.nread += 1
+}
+
+func (rb *readbuf) Len() int {
+	return len(rb.data)
+}
+
+func (rb *readbuf) NRead() int {
+	return rb.nread
+}
+
+func (reply *MetaGetReply) readFlags(line []byte) (int, error) {
+	rb := readbuf{data: line}
+	for rb.Len() > 0 {
+		switch rb.data[0] {
+		case 'b':
+			rb.Advance()
+			if rb.Len() > 0 {
+				if rb.data[0] != ' ' {
+					return 0, fmt.Errorf(`unexpected character %c, expected space`, line[0])
+				}
+				rb.Advance()
+			}
+			reply.SetKeyAsBase64(true)
+		case 'c':
+			rb.Advance()
+			var val strings.Builder
+			for rb.Len() > 0 && rb.data[0] != ' ' {
+				val.WriteByte(rb.data[0])
+				rb.Advance()
+			}
+			if val.Len() == 0 {
+				return 0, fmt.Errorf(`expected value after mg flag c`)
+			}
+
+			u64, err := strconv.ParseUint(val.String(), 10, 64)
+			if err != nil {
+				return 0, fmt.Errorf(`failed to parse cas: %w`, err)
+			}
+			reply.SetCas(u64)
+		case 'f':
+			rb.Advance()
+			var val strings.Builder
+			for rb.Len() > 0 && rb.data[0] != ' ' {
+				val.WriteByte(rb.data[0])
+				rb.Advance()
+			}
+			if val.Len() == 0 {
+				return 0, fmt.Errorf(`expected value after mg flag f`)
+			}
+
+			u32, err := strconv.ParseUint(val.String(), 10, 32)
+			if err != nil {
+				return 0, fmt.Errorf(`failed to parse client flags: %w`, err)
+			}
+			reply.SetClientFlags(uint32(u32))
+		case 'h':
+			rb.Advance()
+			if rb.Len() < 1 {
+				return 0, fmt.Errorf(`expected value after mg flag h`)
+			}
+
+			switch rb.data[0] {
+			case ' ':
+				return 0, fmt.Errorf(`unexpected space after mg flag h`)
+			case '0':
+				reply.SetPreviousHit(false)
+			case '1':
+				reply.SetPreviousHit(true)
+			default:
+				return 0, fmt.Errorf(`unexpected character %c after flag h, expected 0 or 1`, rb.data[0])
+			}
+			rb.Advance() // consume '0' or '1'
+
+			if rb.Len() > 0 {
+				if rb.data[0] != ' ' {
+					return 0, fmt.Errorf(`unexpected character %c, expected space`, rb.data[0])
+				}
+				rb.Advance()
+			}
+		case 'k':
+			rb.Advance()
+			var val strings.Builder
+			for rb.Len() > 0 && rb.data[0] != ' ' {
+				val.WriteByte(rb.data[0])
+				rb.Advance()
+			}
+
+			if rb.Len() > 0 {
+				if rb.data[0] != ' ' {
+					return 0, fmt.Errorf(`unexpected character %c, expected space`, rb.data[0])
+				}
+				rb.Advance()
+			}
+
+			if val.Len() == 0 {
+				return 0, fmt.Errorf(`expected value after mg flag k`)
+			}
+			reply.SetRetrieveKey(val.String())
+		case 'l':
+			rb.Advance()
+			var val strings.Builder
+			for rb.Len() > 0 && rb.data[0] != ' ' {
+				val.WriteByte(rb.data[0])
+				rb.Advance()
+			}
+
+			if rb.Len() > 0 {
+				if rb.data[0] != ' ' {
+					return 0, fmt.Errorf(`unexpected character %c, expected space`, rb.data[0])
+				}
+				rb.Advance()
+			}
+
+			if val.Len() == 0 {
+				return 0, fmt.Errorf(`expected value after mg flag l`)
+			}
+
+			u64, err := strconv.ParseUint(val.String(), 10, 64)
+			if err != nil {
+				return 0, fmt.Errorf(`failed to parse time since last access: %w`, err)
+			}
+			reply.SetTimeSinceLastAccess(u64)
+		case 'O':
+			rb.Advance()
+			var val bytes.Buffer
+			for rb.Len() > 0 && rb.data[0] != ' ' {
+				val.WriteByte(rb.data[0])
+				rb.Advance()
+			}
+
+			if rb.Len() > 0 {
+				if rb.data[0] != ' ' {
+					return 0, fmt.Errorf(`unexpected character %c, expected space`, rb.data[0])
+				}
+				rb.Advance()
+			}
+
+			if val.Len() == 0 {
+				return 0, fmt.Errorf(`expected value after mg flag O`)
+			}
+
+			reply.SetOpaque(val.Bytes())
+		case 's':
+			rb.Advance()
+			var val strings.Builder
+			for rb.Len() > 0 && rb.data[0] != ' ' {
+				val.WriteByte(rb.data[0])
+				rb.Advance()
+			}
+
+			if rb.Len() > 0 {
+				if rb.data[0] != ' ' {
+					return 0, fmt.Errorf(`unexpected character %c, expected space`, rb.data[0])
+				}
+				rb.Advance()
+			}
+
+			if val.Len() == 0 {
+				return 0, fmt.Errorf(`expected value after mg flag s`)
+			}
+
+			u64, err := strconv.ParseUint(val.String(), 10, 64)
+			if err != nil {
+				return 0, fmt.Errorf(`failed to parse item size: %w`, err)
+			}
+			reply.SetItemSize(u64)
+		case 't':
+			rb.Advance()
+			var val strings.Builder
+			for rb.Len() > 0 && rb.data[0] != ' ' {
+				val.WriteByte(rb.data[0])
+				rb.Advance()
+			}
+
+			if rb.Len() > 0 {
+				if rb.data[0] != ' ' {
+					return 0, fmt.Errorf(`unexpected character %c, expected space`, rb.data[0])
+				}
+				rb.Advance()
+			}
+
+			if val.Len() == 0 {
+				return 0, fmt.Errorf(`expected value after mg flag t`)
+			}
+
+			i64, err := strconv.ParseInt(val.String(), 10, 64)
+			if err != nil {
+				return 0, fmt.Errorf(`failed to parse remaining ttl: %w`, err)
+			}
+			reply.SetRemainingTTL(i64)
+		case 'W':
+			rb.Advance()
+			if rb.Len() > 0 {
+				if rb.data[0] != ' ' {
+					return 0, fmt.Errorf(`unexpected character %c, expected space`, rb.data[0])
+				}
+				rb.Advance()
+			}
+			reply.SetRecacheResult(true)
+		case 'X':
+			rb.Advance()
+			if rb.Len() > 0 {
+				if rb.data[0] != ' ' {
+					return 0, fmt.Errorf(`unexpected character %c, expected space`, rb.data[0])
+				}
+				rb.Advance()
+			}
+			reply.SetStale(true)
+		case 'Z':
+			rb.Advance()
+			if rb.Len() > 0 {
+				if rb.data[0] != ' ' {
+					return 0, fmt.Errorf(`unexpected character %c, expected space`, rb.data[0])
+				}
+				rb.Advance()
+			}
+			reply.SetRecacheResult(false)
+		default:
+			return 0, fmt.Errorf(`unknown flag %c`, line[0])
+		}
+		line = line[1:]
+	}
+	return rb.NRead(), nil
 }

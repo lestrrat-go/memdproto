@@ -1,13 +1,81 @@
 package memdproto_test
 
 import (
+	"bufio"
 	"bytes"
+	"context"
+	"fmt"
+	"net"
+	"os"
+	"os/exec"
 	"reflect"
+	"strconv"
 	"testing"
+	"time"
 
 	"github.com/lestrrat-go/memdproto"
 	"github.com/stretchr/testify/require"
 )
+
+var MemcachedAddr string
+
+func TestMain(m *testing.M) {
+	st, err := testMain(m)
+	if err != nil {
+		panic(err)
+	}
+	os.Exit(st)
+}
+
+func testMain(m *testing.M) (int, error) {
+	if v, ok := os.LookupEnv("MEMCACHED_ADDR"); ok {
+		MemcachedAddr = v
+		return m.Run(), nil
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	memdpath, err := exec.LookPath("memcached")
+	if err == nil {
+		// find an empty port
+		localAddr := "127.0.0.1"
+	OUTER:
+		for i := 31211; i < 65535; i++ {
+			port := strconv.Itoa(i)
+			addr := net.JoinHostPort(localAddr, port)
+			ln, err := net.Listen("tcp", addr)
+			if err != nil {
+				continue
+			}
+
+			ln.Close()
+			memdcmd := exec.CommandContext(ctx, memdpath, "-l", "127.0.0.1", "-p", port, "-vvv")
+			memdcmd.Start()
+			defer memdcmd.Process.Kill()
+
+			t := time.NewTimer(5 * time.Second)
+			for {
+				select {
+				case <-ctx.Done():
+					return 0, fmt.Errorf("context anceled while trying to connect to local memcached running on %q", addr)
+				case <-t.C:
+					return 0, fmt.Errorf("timeout reached while trying to connect to local memcached running on %q", addr)
+				default:
+					var dialer net.Dialer
+					conn, err := dialer.DialContext(ctx, "tcp", addr)
+					if err == nil {
+						conn.Close()
+						MemcachedAddr = addr
+						break OUTER
+					}
+				}
+			}
+		}
+	}
+
+	return m.Run(), nil
+}
 
 func TestGetCmdMarshal(t *testing.T) {
 	t.Run("get", func(t *testing.T) {
@@ -25,7 +93,7 @@ func TestGetCmdMarshal(t *testing.T) {
 	t.Run("get reply", func(t *testing.T) {
 		reply := memdproto.NewGetReply()
 
-		reply.AddItem(
+		reply.AddItems(
 			memdproto.NewGetReplyItem("/foo", []byte("bar")).
 				SetFlags(12345).
 				SetCas(12345),
@@ -95,4 +163,32 @@ func TestSetCmdMarshal(t *testing.T) {
 			require.Equal(t, cmd, cmd2, "cmd and cmd2 should be equal")
 		})
 	}
+}
+
+func TestLive(t *testing.T) {
+	if MemcachedAddr == "" {
+		t.Skip("memcached not running")
+	}
+
+	conn, err := net.Dial("tcp", MemcachedAddr)
+	require.NoError(t, err, "net.Dial should succeed")
+
+	payload := []byte("bar")
+
+	setCmd := memdproto.NewMetaSetCmd("/foo", payload)
+	setCmd.WriteTo(conn)
+	// TODO: properly read the result from ms command
+	bufio.NewReader(conn).ReadString('\n')
+
+	getCmd := memdproto.NewMetaGetCmd("/foo")
+	getCmd.SetRetrieveKey(true).
+		SetRetrieveValue(true).
+		WriteTo(conn)
+
+	var reply memdproto.MetaGetReply
+	_, err = reply.ReadFrom(conn)
+	require.NoError(t, err, "reply.ReadFrom should succeed")
+
+	require.Equal(t, "/foo", reply.Key(), "reply.Key should match")
+	require.Equal(t, payload, reply.Value(), "reply.Value should match")
 }

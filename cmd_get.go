@@ -2,6 +2,7 @@ package memdproto
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"io"
 	"sync"
@@ -202,7 +203,7 @@ func (item *GetReplyItem) SetFlags(flags uint16) *GetReplyItem {
 
 type GetReply struct {
 	mu    sync.RWMutex
-	items []GetReplyItem
+	items []*GetReplyItem
 }
 
 var _ Reply = (*GetReply)(nil)
@@ -211,11 +212,11 @@ func NewGetReply() *GetReply {
 	return &GetReply{}
 }
 
-func (reply *GetReply) AddItems(item ...*GetReplyItem) *GetReply {
+func (reply *GetReply) AddItems(items ...*GetReplyItem) *GetReply {
 	reply.mu.Lock()
 	defer reply.mu.Unlock()
 
-	reply.items = append(reply.items, *item...)
+	reply.items = append(reply.items, items...)
 	return reply
 }
 
@@ -271,7 +272,68 @@ func (reply *GetReply) WriteTo(dst io.Writer) (int64, error) {
 	return written, err
 }
 
+/*
 func (reply *GetReply) UnmarshalText(data []byte) error {
+	// VALUE <key> <flags> <size> [<cas unique>]
+	rdr := bufio.NewReader(bytes.NewReader(data)
+	cmd, err := rdr.ReadString(' ')
+	if err != nil {
+		return fmt.Errorf("memdproto.GetReply: expected VALUE %w", err)
+	}
+	if err != nil {
+		return fmt.Errorf("memdproto.GetReply: expected key %w", err)
+	}
+	key = key[:len(key)-1]
 
-	panic("unimplemented")
+	flagStr, err := rdr.ReadString(' ')
+	if err != nil {
+		return fmt.Errorf("memdproto.GetReply: expected flags %w", err)
+	}
+
+	flagStr = flagStr[:len(flags)-1]
+	flags, err := strconv.ParseUint(flagStr, 10, 16)
+	if err != nil {
+		return fmt.Errorf("memdproto.GetReply: expected numeric flags: %w", err)
+	}
+
+	// next token is everything from the size to possible CAS value.
+	sizeStr, err := rdr.ReadString('\r')
+	if err != nil {
+		return fmt.Errorf("memdproto.GetReply: expected size %w", err)
+	}
+	sizeStr = sizeStr[:len(sizeStr)-1]
+
+	// next ReadRune should be '\n'
+	r, _, err := rdr.ReadRune()
+	if err != nil {
+		return fmt.Errorf("memdproto.GetReply: expected newline after size %w", err)
+	}
+	if r != '\n' {
+		return errors.New("memdproto.GetReply: expected newline after size")
+	}
+
+	var casStr string
+	if i := strings.IndexRune(sizeStr, ' '); i > 0 {
+		casStr = sizeStr[i+1:]
+		sizeStr = sizeStr[:i]
+	}
+
+	size, err := strconv.ParseUint(sizeStr, 10, 64)
+	if err != nil {
+		return fmt.Errorf("memdproto.GetReply: expected numeric size: %w", err)
+	}
+
+	if casStr != "" {
+		cas, err := strconv.ParseUint(casStr, 10, 64)
+		if err != nil {
+			return fmt.Errorf("memdproto.GetReply: expected numeric cas: %w", err)
+		}
+	}
+
+
+}
+*/
+
+func (reply *GetReply) UnmarshalText(data []byte) error {
+	return errors.New("not implemented")
 }
