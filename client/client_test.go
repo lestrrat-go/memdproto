@@ -91,6 +91,11 @@ func TestClient(t *testing.T) {
 	require.NoError(t, err, `client.MetaGet.Do should succeed`)
 	require.True(t, mgres.Miss(), `client.MetaGet.Do should result in a miss`)
 
+	mdres, err := cl.MetaDelete(prefix + "foo").
+		Do(ctx)
+	require.NoError(t, err, `client.MetaDelete.Do should succeed`)
+	require.True(t, mdres.Deleted() || mdres.NotFound(), `client.MetaDelete.Do should result in deleted or not found`)
+
 	msres, err := cl.MetaSet(prefix+"foo", payload).
 		Do(ctx)
 	require.NoError(t, err, `client.MetaSet.Do should succeed`)

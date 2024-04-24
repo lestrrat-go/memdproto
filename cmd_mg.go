@@ -11,6 +11,7 @@ import (
 	"unicode"
 )
 
+// MetaGetCmd represents the memcached meta get command.
 type MetaGetCmd struct {
 	key                 string
 	b64                 *FlagKeyAsBase64
@@ -669,7 +670,7 @@ func (reply *MetaGetReply) ReadFrom(src io.Reader) (int64, error) {
 	lline := len(line)
 	nread := int64(lline)
 	if lline < 2 || (line[lline-2] != '\r') || (line[lline-1] != '\n') {
-		return int64(lline), fmt.Errorf(`expected CRLF at end of line`)
+		return int64(lline), fmt.Errorf(`memdproto.MetaGetReply: expected CRLF at end of line`)
 	}
 
 	line = line[:lline-2] // strip CRLF
@@ -680,29 +681,13 @@ func (reply *MetaGetReply) ReadFrom(src io.Reader) (int64, error) {
 	} else if lline > 2 && line[0] == 'H' && line[1] == 'D' && line[2] == ' ' {
 		reply.readFlags(line[3:])
 		if err != nil {
-			return nread, fmt.Errorf(`failed to read flags: %w`, err)
+			return nread, fmt.Errorf(`memdproto.MetaGetReply: failed to read flags: %w`, err)
 		}
 		return nread, nil
 	} else if lline > 4 && line[0] == 'V' && line[1] == 'A' && line[2] == ' ' {
 		rb := readbuf{data: line[3:]}
-		var size strings.Builder
-		for rb.Len() > 0 && rb.data[0] != ' ' {
-			size.WriteByte(rb.data[0])
-			rb.Advance()
-		}
-
-		if rb.Len() > 0 {
-			if rb.data[0] != ' ' {
-				return 0, fmt.Errorf(`expected space after size in response`)
-			}
-			rb.Advance()
-		}
-
-		if size.Len() == 0 {
-			return 0, fmt.Errorf(`expected size after VA flag`)
-		}
-
-		sz, err := strconv.ParseUint(size.String(), 10, 64)
+		size := rb.ReadToken()
+		sz, err := strconv.ParseUint(size, 10, 64)
 		if err != nil {
 			return 0, fmt.Errorf(`failed to parse size: %w`, err)
 		}
@@ -742,67 +727,40 @@ func (reply *MetaGetReply) ReadFrom(src io.Reader) (int64, error) {
 	return nread, fmt.Errorf(`unexpected response for mg command`)
 }
 
-type readbuf struct {
-	data  []byte
-	nread int
-}
-
-func (rb *readbuf) Advance() {
-	rb.data = rb.data[1:]
-	rb.nread += 1
-}
-
-func (rb *readbuf) Len() int {
-	return len(rb.data)
-}
-
-func (rb *readbuf) NRead() int {
-	return rb.nread
-}
-
 func (reply *MetaGetReply) readFlags(line []byte) (int, error) {
 	rb := readbuf{data: line}
 	for rb.Len() > 0 {
+		if rb.data[0] != ' ' {
+			return 0, fmt.Errorf(`memdproto.MetaGetReply: unexpected character %c, expected space`, rb.data[0])
+		}
+		rb.Advance()
+
 		switch rb.data[0] {
 		case 'b':
 			rb.Advance()
-			if rb.Len() > 0 {
-				if rb.data[0] != ' ' {
-					return 0, fmt.Errorf(`unexpected character %c, expected space`, line[0])
-				}
-				rb.Advance()
-			}
 			reply.SetKeyAsBase64(true)
 		case 'c':
 			rb.Advance()
-			var val strings.Builder
-			for rb.Len() > 0 && rb.data[0] != ' ' {
-				val.WriteByte(rb.data[0])
-				rb.Advance()
-			}
-			if val.Len() == 0 {
-				return 0, fmt.Errorf(`expected value after mg flag c`)
+			s := rb.ReadToken()
+			if s == "" {
+				return 0, fmt.Errorf(`memdproto.MetaGetReply: expected value after mg flag c`)
 			}
 
-			u64, err := strconv.ParseUint(val.String(), 10, 64)
+			u64, err := strconv.ParseUint(s, 10, 64)
 			if err != nil {
-				return 0, fmt.Errorf(`failed to parse cas: %w`, err)
+				return 0, fmt.Errorf(`memdproto.MetaGetReply: failed to parse cas: %w`, err)
 			}
 			reply.SetCas(u64)
 		case 'f':
 			rb.Advance()
-			var val strings.Builder
-			for rb.Len() > 0 && rb.data[0] != ' ' {
-				val.WriteByte(rb.data[0])
-				rb.Advance()
-			}
-			if val.Len() == 0 {
-				return 0, fmt.Errorf(`expected value after mg flag f`)
+			s := rb.ReadToken()
+			if s == "" {
+				return 0, fmt.Errorf(`memdproto.MetaGetReply: expected value after mg flag f`)
 			}
 
-			u32, err := strconv.ParseUint(val.String(), 10, 32)
+			u32, err := strconv.ParseUint(s, 10, 32)
 			if err != nil {
-				return 0, fmt.Errorf(`failed to parse client flags: %w`, err)
+				return 0, fmt.Errorf(`memdproto.MetaGetReply: failed to parse client flags: %w`, err)
 			}
 			reply.SetClientFlags(uint32(u32))
 		case 'h':
@@ -819,156 +777,70 @@ func (reply *MetaGetReply) readFlags(line []byte) (int, error) {
 			case '1':
 				reply.SetPreviousHit(true)
 			default:
-				return 0, fmt.Errorf(`unexpected character %c after flag h, expected 0 or 1`, rb.data[0])
+				return 0, fmt.Errorf(`memdproto.MetaGetReply: unexpected character %c after flag h, expected 0 or 1`, rb.data[0])
 			}
 			rb.Advance() // consume '0' or '1'
-
-			if rb.Len() > 0 {
-				if rb.data[0] != ' ' {
-					return 0, fmt.Errorf(`unexpected character %c, expected space`, rb.data[0])
-				}
-				rb.Advance()
-			}
 		case 'k':
 			rb.Advance()
-			var val strings.Builder
-			for rb.Len() > 0 && rb.data[0] != ' ' {
-				val.WriteByte(rb.data[0])
-				rb.Advance()
+			s := rb.ReadToken()
+			if s == "" {
+				return 0, fmt.Errorf(`memdproto.MetaGetReply: expected value after mg flag k`)
 			}
-
-			if rb.Len() > 0 {
-				if rb.data[0] != ' ' {
-					return 0, fmt.Errorf(`unexpected character %c, expected space`, rb.data[0])
-				}
-				rb.Advance()
-			}
-
-			if val.Len() == 0 {
-				return 0, fmt.Errorf(`expected value after mg flag k`)
-			}
-			reply.SetRetrieveKey(val.String())
+			reply.SetRetrieveKey(s)
 		case 'l':
 			rb.Advance()
-			var val strings.Builder
-			for rb.Len() > 0 && rb.data[0] != ' ' {
-				val.WriteByte(rb.data[0])
-				rb.Advance()
+			s := rb.ReadToken()
+			if s == "" {
+				return 0, fmt.Errorf(`memdproto.MetaGetReply: expected value after mg flag l`)
 			}
 
-			if rb.Len() > 0 {
-				if rb.data[0] != ' ' {
-					return 0, fmt.Errorf(`unexpected character %c, expected space`, rb.data[0])
-				}
-				rb.Advance()
-			}
-
-			if val.Len() == 0 {
-				return 0, fmt.Errorf(`expected value after mg flag l`)
-			}
-
-			u64, err := strconv.ParseUint(val.String(), 10, 64)
+			u64, err := strconv.ParseUint(s, 10, 64)
 			if err != nil {
-				return 0, fmt.Errorf(`failed to parse time since last access: %w`, err)
+				return 0, fmt.Errorf(`memdproto.MetaGetReply: failed to parse time since last access: %w`, err)
 			}
 			reply.SetTimeSinceLastAccess(u64)
 		case 'O':
 			rb.Advance()
-			var val bytes.Buffer
-			for rb.Len() > 0 && rb.data[0] != ' ' {
-				val.WriteByte(rb.data[0])
-				rb.Advance()
+			s := rb.ReadTokenBytes()
+			if len(s) == 0 {
+				return 0, fmt.Errorf(`memdproto.MetaGetReply: expected value after mg flag O`)
 			}
-
-			if rb.Len() > 0 {
-				if rb.data[0] != ' ' {
-					return 0, fmt.Errorf(`unexpected character %c, expected space`, rb.data[0])
-				}
-				rb.Advance()
-			}
-
-			if val.Len() == 0 {
-				return 0, fmt.Errorf(`expected value after mg flag O`)
-			}
-
-			reply.SetOpaque(val.Bytes())
+			reply.SetOpaque(s)
 		case 's':
 			rb.Advance()
-			var val strings.Builder
-			for rb.Len() > 0 && rb.data[0] != ' ' {
-				val.WriteByte(rb.data[0])
-				rb.Advance()
+			s := rb.ReadToken()
+			if s == "" {
+				return 0, fmt.Errorf(`memdproto.MetaGetReply: expected value after mg flag s`)
 			}
 
-			if rb.Len() > 0 {
-				if rb.data[0] != ' ' {
-					return 0, fmt.Errorf(`unexpected character %c, expected space`, rb.data[0])
-				}
-				rb.Advance()
-			}
-
-			if val.Len() == 0 {
-				return 0, fmt.Errorf(`expected value after mg flag s`)
-			}
-
-			u64, err := strconv.ParseUint(val.String(), 10, 64)
+			u64, err := strconv.ParseUint(s, 10, 64)
 			if err != nil {
-				return 0, fmt.Errorf(`failed to parse item size: %w`, err)
+				return 0, fmt.Errorf(`memdproto.MetaGetReply: failed to parse item size: %w`, err)
 			}
 			reply.SetItemSize(u64)
 		case 't':
 			rb.Advance()
-			var val strings.Builder
-			for rb.Len() > 0 && rb.data[0] != ' ' {
-				val.WriteByte(rb.data[0])
-				rb.Advance()
+			s := rb.ReadToken()
+			if s == "" {
+				return 0, fmt.Errorf(`memdproto.MetaGetReply: expected value after mg flag t`)
 			}
 
-			if rb.Len() > 0 {
-				if rb.data[0] != ' ' {
-					return 0, fmt.Errorf(`unexpected character %c, expected space`, rb.data[0])
-				}
-				rb.Advance()
-			}
-
-			if val.Len() == 0 {
-				return 0, fmt.Errorf(`expected value after mg flag t`)
-			}
-
-			i64, err := strconv.ParseInt(val.String(), 10, 64)
+			i64, err := strconv.ParseInt(s, 10, 64)
 			if err != nil {
-				return 0, fmt.Errorf(`failed to parse remaining ttl: %w`, err)
+				return 0, fmt.Errorf(`memdproto.MetaGetReply: failed to parse remaining ttl: %w`, err)
 			}
 			reply.SetRemainingTTL(i64)
 		case 'W':
 			rb.Advance()
-			if rb.Len() > 0 {
-				if rb.data[0] != ' ' {
-					return 0, fmt.Errorf(`unexpected character %c, expected space`, rb.data[0])
-				}
-				rb.Advance()
-			}
 			reply.SetRecacheResult(true)
 		case 'X':
 			rb.Advance()
-			if rb.Len() > 0 {
-				if rb.data[0] != ' ' {
-					return 0, fmt.Errorf(`unexpected character %c, expected space`, rb.data[0])
-				}
-				rb.Advance()
-			}
 			reply.SetStale(true)
 		case 'Z':
 			rb.Advance()
-			if rb.Len() > 0 {
-				if rb.data[0] != ' ' {
-					return 0, fmt.Errorf(`unexpected character %c, expected space`, rb.data[0])
-				}
-				rb.Advance()
-			}
 			reply.SetRecacheResult(false)
 		default:
-			return 0, fmt.Errorf(`unknown flag %c`, line[0])
+			return 0, fmt.Errorf(`memdproto.MetaGetReply: unknown flag %c`, line[0])
 		}
 		line = line[1:]
 	}
