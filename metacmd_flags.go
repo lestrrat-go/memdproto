@@ -316,3 +316,43 @@ func (m *MetaSetMode) WriteTo(dst io.Writer) (int64, error) {
 
 	return int64(n), err
 }
+
+type FlagCompareCas uint64
+
+func (f *FlagCompareCas) WriteTo(dst io.Writer) (int64, error) {
+	if f == nil {
+		return 0, nil
+	}
+	n, err := fmt.Fprintf(dst, "C%d", *f)
+	return int64(n), err
+}
+
+type FlagSetClientFlags uint32
+
+func (f *FlagSetClientFlags) WriteTo(dst io.Writer) (int64, error) {
+	if f == nil {
+		return 0, nil
+	}
+	n, err := fmt.Fprintf(dst, "F%d", *f)
+	return int64(n), err
+}
+
+type FlagInvalidateOnOldCas struct{}
+
+func (f *FlagInvalidateOnOldCas) WriteTo(dst io.Writer) (int64, error) {
+	if f == nil {
+		return 0, nil
+	}
+	n, err := dst.Write([]byte{'I'})
+	return int64(n), err
+}
+
+type FlagSetTTL int64
+
+func (f *FlagSetTTL) WriteTo(dst io.Writer) (int64, error) {
+	if f == nil {
+		return 0, nil
+	}
+	n, err := fmt.Fprintf(dst, "T%d", *f)
+	return int64(n), err
+}

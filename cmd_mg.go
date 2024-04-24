@@ -674,7 +674,7 @@ func (reply *MetaGetReply) ReadFrom(src io.Reader) (int64, error) {
 
 	line = line[:lline-2] // strip CRLF
 
-	if lline == 2 && line[0] == 'E' && line[1] == 'N' {
+	if lline == 4 && line[0] == 'E' && line[1] == 'N' {
 		reply.miss = true
 		return nread, nil
 	} else if lline > 2 && line[0] == 'H' && line[1] == 'D' && line[2] == ' ' {
@@ -691,10 +691,12 @@ func (reply *MetaGetReply) ReadFrom(src io.Reader) (int64, error) {
 			rb.Advance()
 		}
 
-		if rb.data[0] != ' ' {
-			return 0, fmt.Errorf(`expected space after size in response`)
+		if rb.Len() > 0 {
+			if rb.data[0] != ' ' {
+				return 0, fmt.Errorf(`expected space after size in response`)
+			}
+			rb.Advance()
 		}
-		rb.Advance()
 
 		if size.Len() == 0 {
 			return 0, fmt.Errorf(`expected size after VA flag`)
@@ -733,8 +735,8 @@ func (reply *MetaGetReply) ReadFrom(src io.Reader) (int64, error) {
 			return int64(nread), fmt.Errorf(`expected CRLF after value, got %d bytes`, ncrlf)
 		}
 		return nread, nil
-	} else if lline > 12 && bytes.Equal(line[:12], []byte("CLIENT_ERROR ")) {
-		return nread, fmt.Errorf(`client error: %s`, line[12:])
+	} else if lline > 12 && bytes.Equal(line[:13], []byte("CLIENT_ERROR ")) {
+		return nread, fmt.Errorf(`client error: %s`, line[13:])
 	}
 
 	return nread, fmt.Errorf(`unexpected response for mg command`)

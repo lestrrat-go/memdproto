@@ -1,7 +1,6 @@
 package memdproto_test
 
 import (
-	"bufio"
 	"bytes"
 	"context"
 	"fmt"
@@ -176,9 +175,14 @@ func TestLive(t *testing.T) {
 	payload := []byte("bar")
 
 	setCmd := memdproto.NewMetaSetCmd("/foo", payload)
-	setCmd.WriteTo(conn)
-	// TODO: properly read the result from ms command
-	bufio.NewReader(conn).ReadString('\n')
+	setCmd.SetRetrieveKey(true).
+		WriteTo(conn)
+	setCmd.WriteTo(os.Stdout)
+
+	var setReply memdproto.MetaSetReply
+	_, err = setReply.ReadFrom(conn)
+	require.NoError(t, err, "setReply.ReadFrom should succeed")
+	require.Equal(t, setReply.Key(), "/foo", "setReply.Key should match")
 
 	getCmd := memdproto.NewMetaGetCmd("/foo")
 	getCmd.SetRetrieveKey(true).
